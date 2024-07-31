@@ -12,6 +12,7 @@ package evm
 
 import (
 	// "fmt"
+	"fmt"
 	"math/big"
 )
 
@@ -503,14 +504,107 @@ func Evm(code []byte) ([]*big.Int, bool) {
 			if len(stack) < 2 {
 				return nil, false
 			}
-			
-			number1 := stack[0]
-			number2 := stack[1]
-
-			result := new(big.Int).Lsh(number1, uint(number2.Int64()))
-			
-			
+		
+			shiftAmount := stack[0]
+			value := stack[1]
+		
+			shiftInt := shiftAmount.Uint64()
+			result := new(big.Int).Lsh(value, uint(shiftInt))
+		
+			mask := new(big.Int).Lsh(big.NewInt(1), 256) 
+			mask.Sub(mask, big.NewInt(1))               
+			result.And(result, mask)
+		
 			stack = append([]*big.Int{result}, stack[2:]...)
+		}
+
+		//26. SHR
+		if (op == 0x1c) {
+			if len(stack) < 2 {
+				return nil, false
+			}
+		
+			shiftAmount := stack[0]
+			value := stack[1]
+		
+			shiftInt := shiftAmount.Uint64()
+			result := new(big.Int).Rsh(value, uint(shiftInt))
+		
+			mask := new(big.Int).Lsh(big.NewInt(1), 256) 
+			mask.Sub(mask, big.NewInt(1))               
+			result.And(result, mask)
+		
+			stack = append([]*big.Int{result}, stack[2:]...)
+		}
+
+		//27. SAR
+		if op == 0x1d {
+			if len(stack) < 2 {
+				return nil, false
+			}
+		
+			shiftAmount := stack[0]
+			value := stack[1]
+			stack = stack[2:]
+		
+			shiftInt := int(shiftAmount.Uint64())
+		
+			if shiftInt >= 256 {
+
+				if negative_converter(value).Sign() < 0 {
+					result := new(big.Int).Lsh(big.NewInt(1), 256)
+					result.Sub(result, big.NewInt(1)) 
+					stack = append([]*big.Int{result}, stack...)
+				} else {
+					stack = append([]*big.Int{big.NewInt(0)}, stack...)
+				}
+
+			} else {
+				result := new(big.Int).Rsh(value, uint(shiftInt))
+		
+				if negative_converter(value).Sign() < 0 {
+
+					signBit := new(big.Int).Lsh(big.NewInt(1), 256-uint(shiftInt))
+					signBit.Sub(signBit, big.NewInt(1))
+
+					extended := new(big.Int).Lsh(big.NewInt(1), uint(shiftInt))
+					extended.Sub(extended, big.NewInt(1))
+					extended.Lsh(extended, uint(256-uint(shiftInt)))
+					result.Or(result, extended)
+				}
+		
+				stack = append([]*big.Int{result}, stack...)
+
+				fmt.Println(stack)
+			}
+		}
+		
+		//28. BYTE
+		if op == 0x1a {
+			if len(stack) < 2 {
+				return nil, false
+			}
+
+			shift := stack[0]
+			value := stack[1]
+			
+			shiftInt := shift.Int64()
+
+			if shiftInt < 32 {
+
+				extended := new(big.Int).Lsh(big.NewInt(1), 32*8)
+				mask := new(big.Int).Lsh(big.NewInt(1), (32 - uint(shiftInt)) * 8)
+
+				extended.Sub(extended, mask)
+				value.And(extended.Not(extended), value)
+
+				value.Rsh(value, 8 * uint(31 - shiftInt))
+
+				stack = append([]*big.Int{value}, stack[2:]...)
+			
+			} else {
+				stack = append([]*big.Int{big.NewInt(0)}, stack[2:]...)
+			}
 		}
 
 	}	
@@ -519,3 +613,18 @@ func Evm(code []byte) ([]*big.Int, bool) {
 }
 
 
+func negative_converter(number *big.Int) *big.Int {
+	bitWidth := 256
+	msb := new(big.Int).Lsh(big.NewInt(1), uint(bitWidth-1))
+
+	if new(big.Int).And(number, msb).Cmp(big.NewInt(0)) != 0 {
+		mask := new(big.Int).Lsh(big.NewInt(1), uint(bitWidth))
+		mask.Sub(mask, big.NewInt(1)) 
+
+		number.Xor(number, mask) 
+		number.Add(number, big.NewInt(1)) 
+		number.Mul(number, big.NewInt(-1))
+	}
+
+	return number
+}
