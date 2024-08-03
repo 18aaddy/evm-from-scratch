@@ -14,6 +14,9 @@ import (
 type testCase struct {
 	Name string `json:"name"`
 	Hint string `json:"hint"`
+	Tx   Transaction `json:"tx"`
+	Block Block  `json:"block"`
+	Accounts map[string]Account  `json:"state"`
 	Code code   `json:"code"`
 	Want want   `json:"expect"`
 }
@@ -92,7 +95,12 @@ func TestEVM(t *testing.T) {
 				fatalAndBugReport(t, "hex.DecodeString(%q) error %v", tt.Code.Bin, err)
 			}
 
-			got, gotSuccess := Evm(bin)
+			// A state containing information about all accounts
+			state := State{
+				Accounts: tt.Accounts,
+			}
+
+			got, gotSuccess := Evm(bin, tt.Tx, tt.Block, state)
 			if gotSuccess != tt.Want.Success {
 				t.Errorf("Evm(…) got success = %t; want %t", gotSuccess, tt.Want.Success)
 			}

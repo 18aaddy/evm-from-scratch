@@ -11,16 +11,126 @@
 package evm
 
 import (
-	// "fmt"
 	"fmt"
 	"math/big"
+	"golang.org/x/crypto/sha3"
+	"encoding/hex"
 )
 
+
+
+//*** Block ***//
+
+type Block struct {
+	Basefee  string `json:"basefee"`
+	Coinbase string `json:"coinbase"`
+	Timestamp string `json:"timestamp"`
+	Number    string `json:"number"`
+	Difficulty string `json:"difficulty"`
+	Gaslimit   string `json:"gaslimit"`
+	Chainid    string `json:"chainid"`
+	Blockhash  int 
+}
+
+//*** State and Account ***//
+
+type Account struct {
+	Nonce    uint64
+	Balance  string `json:"balance"`
+	Storage  map[string]string
+	CodeHash Code `json:"code"`
+}
+
+type Code struct {
+	Asm string `json:"asm"`
+	Bin string `json:"bin"`
+}
+
+type State struct {
+	Accounts map[string]Account
+}
+
+func NewState() *State {
+	return &State{
+		Accounts: make(map[string]Account),
+	}
+}
+
+func (s *State) GetAccount(address string) Account {
+	return s.Accounts[address]
+}
+
+// func (s *State) CreateAccount(address string, balance *big.Int, codeHash string) {
+// 	s.Accounts[address] = &Account{
+// 		Nonce:    0,
+// 		Balance:  balance,
+// 		Storage:  make(map[string]string),
+// 		CodeHash: codeHash,
+// 	}
+// }
+
+// func (s *State) UpdateAccount(address string, balance *big.Int, nonce uint64) {
+// 	account := s.Accounts[address]
+// 	if account != nil {
+// 		account.Balance = balance
+// 		account.Nonce = nonce
+// 	}
+// }
+
+//*** Memory ***//
+
+type Memory struct {
+	data  []byte
+}
+
+type Transaction struct {
+	To       string `json:"to"`
+	From     string `json:"from"`
+	Origin   string `json:"origin"`
+	Gasprice string `json:"gasprice"`
+	Value    string `json:"value"`
+	Data     string `json:"data"`
+}
+
+func NewMemory(size int) *Memory {
+	return &Memory {
+		data: make([]byte, size),
+	}
+}
+
+func (m *Memory) Mstore(value []byte, offset int) {
+	m.MSIZE(offset)
+	copy(m.data[offset:], value)
+}
+
+func (m *Memory) Mstore8(value byte, offset int) {
+	m.MSIZE(offset - 32)
+	m.data[offset] = value
+}
+
+func (m *Memory) MSIZE(offset int) int {
+	for i := 0 ; offset + 32 > len(m.data) ; i++ {
+		extend := make([]byte, 32)
+		m.data = append(m.data, extend...)
+	}
+	return len(m.data)
+}
+
+func (m *Memory) MLoad(offset int, size int) []byte {
+	m.MSIZE(offset)
+	return m.data[offset:offset + size]
+}
+
+
+//****  EVM  FUNCTION  ****//
+
 // Run runs the EVM code and returns the stack and a success indicator.
-func Evm(code []byte) ([]*big.Int, bool) {
+func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big.Int ,bool) {
 	var stack []*big.Int
 	pc := 0
 	successOrNot := true
+
+	m := NewMemory(0)
 
 	for pc < len(code) {
 		op := code[pc]
@@ -607,13 +717,395 @@ func Evm(code []byte) ([]*big.Int, bool) {
 			}
 		}
 
+		//29. DUP1-16 
+		if 0x80 <= op && op <= 0x8f {
+			element := op - 0x80 + 1
+
+			if len(stack) < int(element) {
+				return nil, false
+			}
+
+			value := stack[int(element) - 1]
+			
+			stack = append([]*big.Int{value}, stack...)
+		}
+
+		//30. SWAP1-16
+		if 0x90 <= op && op <= 0x9f {
+			swap := int(op - 0x90 + 1) 
+
+			topItem := stack[0]
+			swapItem := stack[swap]
+
+			if len(stack) < swap {
+				return nil, false
+			}
+			
+			stack[swap] = topItem
+			stack[0] = swapItem
+		}
+
+		//31. INVALID
+		if op == 0xfe {
+			return nil, false
+		}
+
+		//32. PC
+		if op == 0x58 {
+			stack = append([]*big.Int{big.NewInt(int64(pc - 1))}, stack...)
+		}
+
+		//33. GAS
+		if op == 0x5a {			// TODO: Can add actual Gas functionality
+			max_uint := new(big.Int).Lsh(big.NewInt(1), 256)
+			max_uint.Sub(max_uint, big.NewInt(1))
+			stack = append([]*big.Int{max_uint}, stack...)
+		} 
+
+		//34. JUMP, JUMP 1 
+		if op == 0x56 || op == 0x57 {
+			
+			value := stack[0]
+			jumpOrNot := true
+			
+			if op == 0x57 {
+				if len(stack) < 2{
+					return nil, false
+				}
+				jumpOrNot = stack[1].Cmp(big.NewInt(0)) == 0  // If true, means don't jump
+				stack = stack[1:]
+			}
+			
+			stack = stack[1:]
+
+			if !jumpOrNot || op == 0x56 { 
+				if int(value.Int64()) > len(code) - 1 {
+					return nil, false
+				}
+
+				pc = int(value.Int64())
+				op = code[pc]
+
+				if op != 0x5b {
+					return nil, false
+				} else {
+					for i := 0; i<pc; i++ {
+						if code[i] == 0x00 {
+							return nil, false
+						}
+						
+						if 0x60 <= code[i] && code[i] <= 0x7f {
+							increment := int(code[i] - 0x60) + 1
+							if i < pc && pc <= i + increment {
+								return nil, false
+							}
+						}
+					}
+				}
+			}
+
+		}
+
+		//35. MSTORE
+		if op == 0x52 || op == 0x53{
+			if len(stack) < 2 {
+				return nil, false
+			}
+
+			offset := stack[0]
+			offsetInt := int(offset.Int64())
+			value := stack[1]
+
+			stack = stack[2:]
+			valueBytes := value.Bytes()
+
+			if op == 0x53 {
+				m.Mstore8(valueBytes[0], offsetInt)
+			} else {
+
+				if len(valueBytes) < 32 {
+					padding := make([]byte, 32 - len(valueBytes))
+					valueBytes = append(padding, valueBytes...)
+				}
+
+				m.Mstore(valueBytes, offsetInt)
+			}
+		}
+
+		//36. MLOAD
+		if op == 0x51 {
+			offset := stack[0]
+
+			value := m.MLoad(int(offset.Int64()), 32)
+
+			stack = append([]*big.Int{new(big.Int).SetBytes(value)}, stack[1:]...)
+		}
+
+		//37. MSIZE 
+		if op == 0x59 {
+			stack = append([]*big.Int{big.NewInt(int64(m.MSIZE(-32)))}, stack...)
+		}
+
+		//38. SHA3
+		if op == 0x20 {
+			offset := stack[0].Int64()
+			size := stack[1].Int64()
+
+			data := m.MLoad(int(offset), int(size))
+			
+			hasher := sha3.NewLegacyKeccak256()
+			hasher.Write(data)
+			
+			hash := hasher.Sum(nil)
+
+			stack = append([]*big.Int{new(big.Int).SetBytes(hash)}, stack[2:]...)
+		}
+
+		//39. ADDRESS
+		if op == 0x30 {
+			if len(transaction.To) == 0 {
+				return nil, false
+			}
+
+			address, _ := new(big.Int).SetString(transaction.To[2:], 16)
+
+			stack = append([]*big.Int{address}, stack...)
+		}
+
+		//40. CALLER
+		if op == 0x33 {
+			if len(transaction.From) == 0 {
+				return nil, false
+			}
+
+			address, _ := new(big.Int).SetString(transaction.From[2:], 16)
+
+			stack = append([]*big.Int{address}, stack...)
+		}
+
+		//41. ORIGIN
+		if op == 0x32 {
+			if len(transaction.Origin) == 0 {
+				return nil, false
+			}
+			
+			address, _ := new(big.Int).SetString(transaction.Origin[2:], 16)
+
+			stack = append([]*big.Int{address}, stack...)
+		}
+
+		//42. GASPRICE
+		if op == 0x3a {
+			if len(transaction.Gasprice) == 0 {
+				return nil, false
+			}
+			
+			price, _ := new(big.Int).SetString(transaction.Gasprice[2:], 16)
+
+			stack = append([]*big.Int{price}, stack...)
+		}
+
+		//43. BASEFEE
+		if op == 0x48 {
+			if len(block.Basefee) == 0 {
+				return nil, false
+			}
+
+			basefee, _ := new(big.Int).SetString(block.Basefee[2:], 16)
+
+			stack = append([]*big.Int{basefee}, stack...)
+		}
+
+		//44. COINBASE
+		if op == 0x41 {
+			if len(block.Coinbase) == 0 {
+				return nil, false
+			}
+
+			coinbase, _ := new(big.Int).SetString(block.Coinbase[2:], 16)
+
+			stack = append([]*big.Int{coinbase}, stack...)
+		}
+
+		//45. TIMESTAMP
+		if op == 0x42 {
+			if len(block.Timestamp) == 0 {
+				return nil, false
+			}
+
+			timestamp, _ := new(big.Int).SetString(block.Timestamp[2:], 16)
+
+			stack = append([]*big.Int{timestamp}, stack...)
+		}
+
+		//46. NUMBER
+		if op == 0x43 {
+			if len(block.Number) == 0 {
+				return nil, false
+			}
+
+			number, _ := new(big.Int).SetString(block.Number[2:], 16)
+
+			stack = append([]*big.Int{number}, stack...)
+		}
+
+		//47. DIFFICULTY
+		if op == 0x44 {
+			if len(block.Difficulty) == 0 {
+				return nil, false
+			}
+
+			difficulty, _ := new(big.Int).SetString(block.Difficulty[2:], 16)
+
+			stack = append([]*big.Int{difficulty}, stack...)
+		}
+
+		//48. GASLIMIT
+		if op == 0x45 {
+			if len(block.Gaslimit) == 0 {
+				return nil, false
+			}
+
+			gaslimit, _ := new(big.Int).SetString(block.Gaslimit[2:], 16)
+
+			stack = append([]*big.Int{gaslimit}, stack...)
+		}
+
+		//49. CHAINID
+		if op == 0x46 {
+			if len(block.Chainid) == 0 {
+				return nil, false
+			}
+
+			chainid, _ := new(big.Int).SetString(block.Chainid[2:], 16)
+
+			stack = append([]*big.Int{chainid}, stack...)
+		}
+
+		//50. BLOCKHASH
+		if op == 0x40 {
+			// number := stack[0]
+			stack = stack[1:]
+
+			// currentNumber, _ := new(big.Int).SetString(block.Number[2:], 16)
+						
+			//** Normally, you would find a block with the block number given in the stack and use its blockhash
+
+			//** if block is between current block - 256 and current block , then it is valid
+
+			//** What is implemented here is just to fulfill the test
+			
+			// if currentNumber.Cmp(number) < 1 && (currentNumber.Sub(currentNumber, number)).Cmp(big.NewInt(256)) > 0 {
+				// return nil, false 
+			// }
+
+			stack = append([]*big.Int{big.NewInt(int64(block.Blockhash))}, stack...)
+		}
+
+		// 51. BALANCE
+		if op == 0x31 {
+			if len(stack) < 1 {
+				return nil, false
+			}
+
+			address := stack[0]
+			stack = stack[1:]
+
+			accounts := state.Accounts
+
+			account := accounts["0x" + address.Text(16)]
+
+			balance := account.Balance
+
+			if len(balance) == 0 {
+				stack = append([]*big.Int{big.NewInt(0)}, stack...)
+			} else {
+				balanceInt, _ := new(big.Int).SetString(balance[2:], 16)
+
+				stack = append([]*big.Int{balanceInt}, stack...)
+			}
+		}
+
+		//52. CALLVALUE
+		if op == 0x34 {
+			valueString := transaction.Value
+			
+			if len(valueString) == 0 {
+				return nil, false
+			}
+
+			valueInt, _ := new(big.Int).SetString(valueString[2:], 16)
+
+			stack = append([]*big.Int{valueInt}, stack...)
+		}
+
+		//53. CALLDATALOAD
+		if op == 0x35 {
+			if len(stack) < 1 {
+				return nil, false 
+			}
+
+			offset := int(stack[0].Int64())
+			stack = stack[1:]
+
+			data := transaction.Data
+			dataBytes , _ := hex.DecodeString(data)
+			
+			var requiredData []byte;
+
+			if offset + 32 <= len(dataBytes) {
+				requiredData = dataBytes[offset:offset+32]
+			} else {
+				for i:=0; offset+32>=len(dataBytes); i++ { 
+					dataBytes = append(dataBytes, byte(0))
+				}
+				
+				requiredData = dataBytes[offset:offset+32]
+			}
+			_ = requiredData
+
+			requiredDataInt := new(big.Int).SetBytes(requiredData)
+			stack = append([]*big.Int{requiredDataInt}, stack...)
+		}
+
+		//54. CALLDATASIZE
+		if op == 0x36 {
+			data := transaction.Data
+			dataBytes , _ := hex.DecodeString(data)
+			
+			stack = append([]*big.Int{big.NewInt(int64(len(dataBytes)))}, stack...)
+		}
+
+		//55. CALLDATACOPY
+		if op == 0x37 {
+			if len(stack) < 3 {
+				return nil, false
+			}
+
+			memoryOffset := int(stack[0].Int64())
+			calldataOffset := int(stack[1].Int64())
+			sizeCalldata := int(stack[2].Int64())
+
+			stack = stack[3:]
+
+			data := transaction.Data
+			dataBytes , _ := hex.DecodeString(data)
+			
+			dataCopy := dataBytes[calldataOffset : calldataOffset + sizeCalldata]
+			m.Mstore(dataCopy, memoryOffset)
+		}
+
+		//56. CODESIZE
+		if op == 0x38 {
+			stack = append([]*big.Int{big.NewInt(int64(len(code)))}, stack...)
+		}
 	}	
 		
 		return stack, successOrNot
 }
 
 
-func negative_converter(number *big.Int) *big.Int {
+func negative_converter(number *big.Int) *big.Int {   // TODO: Can use this function more in earlier opcodes 
 	bitWidth := 256
 	msb := new(big.Int).Lsh(big.NewInt(1), uint(bitWidth-1))
 

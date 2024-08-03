@@ -5,115 +5,113 @@ import (
 	"fmt"
 )
 
-func LSH(value, shiftAmount *big.Int) *big.Int {
-	// Perform the left shift
-	shiftInt := shiftAmount.Uint64()
-	result := new(big.Int).Lsh(value, uint(shiftInt))
-
-	// Apply the 256-bit mask
-	mask := new(big.Int).Lsh(big.NewInt(1), 256) // 2^256
-	mask.Sub(mask, big.NewInt(1))               // 2^256 - 1
-	result.And(result, mask)
-
-	return result
-}
-
 func main() {
-	value, _ := new(big.Int).SetString("123456789012345678901234567890", 10)
-	shiftAmount := big.NewInt(8) // Example shift amount
+	value , _ := new(big.Int).SetString("455867356320691211509944977504407603390036387149619137164185182714736811808", 10)
+	stack := []*big.Int{big.NewInt(0), value}
 
-	result := LSH(value, shiftAmount)
+	m := NewMemory(0)
 
-	max_uint := new(big.Int).Lsh(big.NewInt(1), 256)
-	max_uint.Sub(max_uint, big.NewInt(1))
-	max_uint_2 := 1 >> 256
-	_ = max_uint_2
+	fmt.Println("400000 in bytes:", big.NewInt(400000).Bytes())
 
-	fmt.Printf("Value: %s\n", value.String())
-	fmt.Printf("Shift Amount: %s\n", shiftAmount.String())
-	fmt.Printf("Result: %s\n", result.String())
-	fmt.Println("Testing something:", max_uint.Text(2))
-
-	op := 0x1d
-	number := new(big.Int).Sub(max_uint, big.NewInt(7))
-
-	stack := []*big.Int{big.NewInt(4), number}
-	fmt.Println("Current Stack:", stack)
-
-	fmt.Println("Negative Converter:", negative_converter(number))
+	op := 0x00
+	i := 0
 
 	
-	if op == 0x1d {
-		// if len(stack) < 2 {
-			// 	return nil, false
-			// }
-			
-		shiftAmount := stack[0]
-		value := stack[1]
-		stack = stack[2:]
+	for i = 0; i < 10; i++ {
 		
-		value = negative_converter(value)
-			
-		fmt.Println("Shift Amount:",shiftAmount)
-		fmt.Println("Value:")
-		fmt.Println("Value First Digit:", value.Text(2))
-	
-		shiftInt := int(shiftAmount.Uint64())
+		switch i {
+		case 0:
+			op = 0x52
+			fmt.Println("Stack round", i , ":", stack)
+		case 1:
+			stack = []*big.Int{big.NewInt(61)}
+			op = 0x51
+		case 2: 
+			return
+			// op = 0x59
 
-
-	
-		if shiftInt >= 256 {
-			if value.Sign() < 0 {
-				// If the original number is negative, fill with all 1s
-				result := new(big.Int).Lsh(big.NewInt(1), 256)
-				result.Sub(result, big.NewInt(1)) // 2^256 - 1
-				stack = append([]*big.Int{result}, stack...)
-			} else {
-				// If the original number is positive, fill with 0s
-				stack = append([]*big.Int{big.NewInt(0)}, stack...)
-			}
-		} else {
-			result := new(big.Int).Rsh(value, uint(shiftInt))
-	
-			if value.Sign() < 0 {
-				// Create a mask for the sign extension
-				signBit := new(big.Int).Lsh(big.NewInt(1), 256-uint(shiftInt))
-				signBit.Sub(signBit, big.NewInt(1))
-				// Shift the mask to the left to fill with 1s
-				extended := new(big.Int).Lsh(big.NewInt(1), uint(shiftInt))
-				extended.Sub(extended, big.NewInt(1))
-				extended.Lsh(extended, uint(256-uint(shiftInt)))
-				
-				fmt.Println("Extended:", extended)
-				fmt.Println("Extended digits:", len(extended.Text(2)))
-
-				result.Or(result, extended)
-			}
-	
-			stack = append([]*big.Int{result}, stack...)
-
-			fmt.Println("Final Answer:",stack[0].Text(2))
-			fmt.Println("Final Answer digits:",len(stack[0].Text(2)))
+		case 4:
+			return 
 		}
+
+		//35. MSTORE
+		if op == 0x52 || op == 0x53{
+			if len(stack) < 2 {
+				// return nil, false
+			}
+
+			offset := stack[0]
+			offsetInt := int(offset.Int64())
+			value := stack[1]
+
+			stack = stack[2:]
+			valueBytes := value.Bytes()
+
+			if op == 0x53 {
+				m.Mstore8(valueBytes[0], offsetInt)
+			} else {
+
+				if len(valueBytes) < 32 {
+					padding := make([]byte, 32 - len(valueBytes))
+					valueBytes = append(padding, valueBytes...)
+				}
+
+				m.Mstore(valueBytes, offsetInt)
+				fmt.Println("Memory:", m)
+			}
+		}
+
+		//36. MLOAD
+		if op == 0x51 {
+			offset := stack[0]
+
+			value := m.MLoad(int(offset.Int64()))
+
+			stack = append([]*big.Int{new(big.Int).SetBytes(value)}, stack[1:]...)
+		}
+
+		//37. MSIZE 
+		if op == 0x59 {
+			stack = append([]*big.Int{big.NewInt(int64(m.MSIZE(-32)))}, stack...)
+		}
+
+		fmt.Println("Stack round", i , ":", stack)
+
 	}
 
-	fmt.Println("Negative Converter on positive:", negative_converter(big.NewInt(24)))
-	fmt.Println("Negative Converter on negative:", negative_converter(big.NewInt(-24)))
-	fmt.Println("Length of this string is:", len("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff602a1a"))
 }
 
-func negative_converter(number *big.Int) *big.Int {
-	bitWidth := 256
-	msb := new(big.Int).Lsh(big.NewInt(1), uint(bitWidth-1))
+type Memory struct {
+	data  []byte
+	// offsetMax int
+}
 
-	if new(big.Int).And(number, msb).Cmp(big.NewInt(0)) != 0 {
-		mask := new(big.Int).Lsh(big.NewInt(1), uint(bitWidth))
-		mask.Sub(mask, big.NewInt(1)) // 2^bitWidth - 1
-
-		number.Xor(number, mask) // Invert the bits
-		number.Add(number, big.NewInt(1)) // Add 1
-		number.Mul(number, big.NewInt(-1)) // Negate the number
+func NewMemory(size int) *Memory {
+	return &Memory {
+		data: make([]byte, size),
 	}
+}
 
-	return number
+func (m *Memory) Mstore(value []byte, offset int) {
+	m.MSIZE(offset)
+	copy(m.data[offset:], value)
+}
+
+func (m *Memory) Mstore8(value byte, offset int) {
+	m.MSIZE(offset - 32)
+	m.data[offset] = value
+}
+
+func (m *Memory) MSIZE(offset int) int {
+	for i := 0 ; offset + 32 > len(m.data) ; i++ {
+		extend := make([]byte, 32)
+		m.data = append(m.data, extend...)
+	}
+	fmt.Println("Current memory length:", len(m.data))
+	return len(m.data)
+}
+
+func (m *Memory) MLoad(offset int) []byte {
+	m.MSIZE(offset)
+	return m.data[offset:offset + 32]
 }
