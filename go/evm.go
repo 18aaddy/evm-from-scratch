@@ -15,6 +15,10 @@ import (
 	"math/big"
 	"golang.org/x/crypto/sha3"
 	"encoding/hex"
+
+	"github.com/ethereum/go-ethereum/common"
+    "github.com/ethereum/go-ethereum/crypto"
+    "github.com/ethereum/go-ethereum/rlp"
 )
 
 
@@ -32,13 +36,17 @@ type Block struct {
 	Blockhash  int 
 }
 
-//*** State and Account ***//
+//*** Storage  ***//
+
+type Storage map[string]*big.Int
+
+//*** State, Account and Logs ***//
 
 type Account struct {
 	Nonce    uint64
 	Balance  string `json:"balance"`
 	Storage  map[string]string
-	CodeHash Code `json:"code"`
+	Code Code `json:"code"`
 }
 
 type Code struct {
@@ -48,6 +56,12 @@ type Code struct {
 
 type State struct {
 	Accounts map[string]Account
+}
+
+type Log struct {
+	Address string  `json:"address"`
+	Data string     `json:"data"`
+	Topics []string `json:"topics"`
 }
 
 func NewState() *State {
@@ -121,16 +135,21 @@ func (m *Memory) MLoad(offset int, size int) []byte {
 	return m.data[offset:offset + size]
 }
 
+var currentExecutingAccount string;
 
 //****  EVM  FUNCTION  ****//
 
 // Run runs the EVM code and returns the stack and a success indicator.
-func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big.Int ,bool) {
+func Evm(code []byte, transaction Transaction, block Block, state State, storage Storage) ([]*big.Int ,[]Log , *big.Int, bool) {
 	var stack []*big.Int
 	pc := 0
 	successOrNot := true
 
 	m := NewMemory(0)
+	var Logs []Log
+	var Return *big.Int
+
+	var LatestReturnData []byte
 
 	for pc < len(code) {
 		op := code[pc]
@@ -351,7 +370,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//14. SIGN EXTEND 
 		if (op == 0x0b) {
 			if len(stack) < 2 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 
 			// Pop b from the stack
@@ -368,7 +387,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 			// Calculate the sign extension mask
 			bInt := int(b.Int64())
 			if bInt >= 32 {
-				return stack, false
+				return nil, nil, nil, false
 			}
 			bits := (bInt + 1) * 8
 			signBit := new(big.Int).Lsh(big.NewInt(1), uint(bits-1))
@@ -395,7 +414,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//15. SDIV
 		if (op == 0x05) {
 			if len(stack) < 2 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 
 			if stack[1].Cmp(big.NewInt(0)) == 0 {
@@ -433,7 +452,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//16. SMOD
 		if (op == 0x07) {
 			if len(stack) < 2 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 
 			number1 := stack[0]
@@ -503,7 +522,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//17. LT
 		if (op == 0x10 || op == 0x12) {
 			if len(stack) < 2 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 
 			number1 := stack[0]
@@ -515,7 +534,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//18. GT
 		if (op == 0x11 || op == 0x13) {
 			if len(stack) < 2 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 
 			number1 := stack[0]
@@ -527,7 +546,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//19. EQ
 		if (op == 0x14) {
 			if len(stack) < 2 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 
 			number1 := stack[0]
@@ -539,7 +558,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//20. ISZERO
 		if (op == 0x15) {
 			if len(stack) < 1 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 
 			number1 := stack[0]
@@ -554,7 +573,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//21. NOT
 		if (op == 0x19) {
 			if len(stack) < 1 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 
 			number1 := stack[0]
@@ -570,7 +589,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//22. AND
 		if (op == 0x16) {
 			if len(stack) < 2 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 
 			number1 := stack[0]
@@ -584,7 +603,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//23. OR
 		if (op == 0x17) {
 			if len(stack) < 2 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 
 			number1 := stack[0]
@@ -598,7 +617,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//24. XOR
 		if (op == 0x18) {
 			if len(stack) < 2 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 
 			number1 := stack[0]
@@ -612,7 +631,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//25. SHL
 		if (op == 0x1b) {
 			if len(stack) < 2 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 		
 			shiftAmount := stack[0]
@@ -631,7 +650,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//26. SHR
 		if (op == 0x1c) {
 			if len(stack) < 2 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 		
 			shiftAmount := stack[0]
@@ -650,7 +669,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//27. SAR
 		if op == 0x1d {
 			if len(stack) < 2 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 		
 			shiftAmount := stack[0]
@@ -692,7 +711,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//28. BYTE
 		if op == 0x1a {
 			if len(stack) < 2 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 
 			shift := stack[0]
@@ -722,7 +741,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 			element := op - 0x80 + 1
 
 			if len(stack) < int(element) {
-				return nil, false
+				return nil, nil, nil, false
 			}
 
 			value := stack[int(element) - 1]
@@ -738,7 +757,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 			swapItem := stack[swap]
 
 			if len(stack) < swap {
-				return nil, false
+				return nil, nil, nil, false
 			}
 			
 			stack[swap] = topItem
@@ -747,7 +766,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 
 		//31. INVALID
 		if op == 0xfe {
-			return nil, false
+			return nil, nil, nil, false
 		}
 
 		//32. PC
@@ -770,7 +789,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 			
 			if op == 0x57 {
 				if len(stack) < 2{
-					return nil, false
+					return nil, nil, nil, false
 				}
 				jumpOrNot = stack[1].Cmp(big.NewInt(0)) == 0  // If true, means don't jump
 				stack = stack[1:]
@@ -780,24 +799,24 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 
 			if !jumpOrNot || op == 0x56 { 
 				if int(value.Int64()) > len(code) - 1 {
-					return nil, false
+					return nil, nil, nil, false
 				}
 
 				pc = int(value.Int64())
 				op = code[pc]
 
 				if op != 0x5b {
-					return nil, false
+					return nil, nil, nil, false
 				} else {
 					for i := 0; i<pc; i++ {
 						if code[i] == 0x00 {
-							return nil, false
+							return nil, nil, nil, false
 						}
 						
 						if 0x60 <= code[i] && code[i] <= 0x7f {
 							increment := int(code[i] - 0x60) + 1
 							if i < pc && pc <= i + increment {
-								return nil, false
+								return nil, nil, nil, false
 							}
 						}
 					}
@@ -806,10 +825,19 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 
 		}
 
+		MSTORE := func(valueBytes []byte, offsetInt int, size int) {
+			if len(valueBytes) < size {
+				padding := make([]byte, size - len(valueBytes))
+				valueBytes = append(padding, valueBytes...)
+			}
+
+			m.Mstore(valueBytes, offsetInt)
+		}
+
 		//35. MSTORE
 		if op == 0x52 || op == 0x53{
 			if len(stack) < 2 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 
 			offset := stack[0]
@@ -822,13 +850,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 			if op == 0x53 {
 				m.Mstore8(valueBytes[0], offsetInt)
 			} else {
-
-				if len(valueBytes) < 32 {
-					padding := make([]byte, 32 - len(valueBytes))
-					valueBytes = append(padding, valueBytes...)
-				}
-
-				m.Mstore(valueBytes, offsetInt)
+				MSTORE(valueBytes, offsetInt, 32)
 			}
 		}
 
@@ -864,7 +886,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//39. ADDRESS
 		if op == 0x30 {
 			if len(transaction.To) == 0 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 
 			address, _ := new(big.Int).SetString(transaction.To[2:], 16)
@@ -875,7 +897,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//40. CALLER
 		if op == 0x33 {
 			if len(transaction.From) == 0 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 
 			address, _ := new(big.Int).SetString(transaction.From[2:], 16)
@@ -886,7 +908,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//41. ORIGIN
 		if op == 0x32 {
 			if len(transaction.Origin) == 0 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 			
 			address, _ := new(big.Int).SetString(transaction.Origin[2:], 16)
@@ -897,7 +919,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//42. GASPRICE
 		if op == 0x3a {
 			if len(transaction.Gasprice) == 0 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 			
 			price, _ := new(big.Int).SetString(transaction.Gasprice[2:], 16)
@@ -908,7 +930,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//43. BASEFEE
 		if op == 0x48 {
 			if len(block.Basefee) == 0 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 
 			basefee, _ := new(big.Int).SetString(block.Basefee[2:], 16)
@@ -919,7 +941,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//44. COINBASE
 		if op == 0x41 {
 			if len(block.Coinbase) == 0 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 
 			coinbase, _ := new(big.Int).SetString(block.Coinbase[2:], 16)
@@ -930,7 +952,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//45. TIMESTAMP
 		if op == 0x42 {
 			if len(block.Timestamp) == 0 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 
 			timestamp, _ := new(big.Int).SetString(block.Timestamp[2:], 16)
@@ -941,7 +963,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//46. NUMBER
 		if op == 0x43 {
 			if len(block.Number) == 0 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 
 			number, _ := new(big.Int).SetString(block.Number[2:], 16)
@@ -952,7 +974,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//47. DIFFICULTY
 		if op == 0x44 {
 			if len(block.Difficulty) == 0 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 
 			difficulty, _ := new(big.Int).SetString(block.Difficulty[2:], 16)
@@ -963,7 +985,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//48. GASLIMIT
 		if op == 0x45 {
 			if len(block.Gaslimit) == 0 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 
 			gaslimit, _ := new(big.Int).SetString(block.Gaslimit[2:], 16)
@@ -974,7 +996,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//49. CHAINID
 		if op == 0x46 {
 			if len(block.Chainid) == 0 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 
 			chainid, _ := new(big.Int).SetString(block.Chainid[2:], 16)
@@ -996,7 +1018,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 			//** What is implemented here is just to fulfill the test
 			
 			// if currentNumber.Cmp(number) < 1 && (currentNumber.Sub(currentNumber, number)).Cmp(big.NewInt(256)) > 0 {
-				// return nil, false 
+				// return nil, nil, nil, false 
 			// }
 
 			stack = append([]*big.Int{big.NewInt(int64(block.Blockhash))}, stack...)
@@ -1005,7 +1027,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		// 51. BALANCE
 		if op == 0x31 {
 			if len(stack) < 1 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 
 			address := stack[0]
@@ -1031,7 +1053,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 			valueString := transaction.Value
 			
 			if len(valueString) == 0 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 
 			valueInt, _ := new(big.Int).SetString(valueString[2:], 16)
@@ -1042,7 +1064,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//53. CALLDATALOAD
 		if op == 0x35 {
 			if len(stack) < 1 {
-				return nil, false 
+				return nil, nil, nil, false 
 			}
 
 			offset := int(stack[0].Int64())
@@ -1079,7 +1101,7 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		//55. CALLDATACOPY
 		if op == 0x37 {
 			if len(stack) < 3 {
-				return nil, false
+				return nil, nil, nil, false
 			}
 
 			memoryOffset := int(stack[0].Int64())
@@ -1099,9 +1121,531 @@ func Evm(code []byte, transaction Transaction, block Block, state State) ([]*big
 		if op == 0x38 {
 			stack = append([]*big.Int{big.NewInt(int64(len(code)))}, stack...)
 		}
-	}	
+
+		//57. CODECOPY
+		if op == 0x39 {
+			if len(stack) < 3 {
+				return nil, nil, nil, false
+			}
+
+			memoryOffset := int(stack[0].Int64())
+			codeOffset := int(stack[1].Int64())
+			sizeCode := int(stack[2].Int64())
+
+			stack = stack[3:]
+			var codeData []byte
+
+			if codeOffset + sizeCode < len(code) {
+				codeData = code[codeOffset:codeOffset+sizeCode]
+			} else {
+				codeData = code[codeOffset:]
+			}
+
+			if len(codeData) < sizeCode {
+				padding := make([]byte, sizeCode - len(codeData))
+				codeData = append(codeData, padding...)
+			}
+
+			m.Mstore(codeData, memoryOffset)
+		}
+
+		//58. EXTCODESIZE
+		if op == 0x3b {
+			if len(stack) < 1 {
+				return nil, nil, nil, false
+			}
+
+			accountAddress := "0x" + stack[0].Text(16)
+
+			account := state.Accounts[accountAddress]
+
+			lengthCode := int64(len(account.Code.Bin)) / 2   // Bin is in hex, therefore in bytes we need to divide by 2
+
+			stack = append([]*big.Int{big.NewInt(lengthCode)}, stack[1:]...)
+		}
+
+		//59. EXTCODECOPY
+		if op == 0x3c {
+			if len(stack) < 4 {
+				return nil, nil, nil, false
+			}
+
+			accountAddress := "0x" + stack[0].Text(16)
+			memoryOffset := int(stack[1].Int64())
+			codeOffset := int(stack[2].Int64())
+			size := int(stack[3].Int64())
+
+			stack = stack[4:]
+
+			account := state.Accounts[accountAddress]
+
+			codeHex := account.Code.Bin
+			code, _ := hex.DecodeString(codeHex)
+
+			var codeToBeCopied []byte 
+
+			if codeOffset + size < len(code) {
+				codeToBeCopied = code[codeOffset:codeOffset+size]
+			} else {
+				codeToBeCopied = code[codeOffset:]
+			}
+
+			if len(codeToBeCopied) < size {
+				padding := make([]byte, size - len(codeToBeCopied))
+				codeToBeCopied = append(codeToBeCopied, padding...)
+			}
+
+			m.Mstore(codeToBeCopied, memoryOffset)
+		}
+
+		//60. EXTCODEHASH
+		if op == 0x3f {
+			if len(stack) < 1 {
+				return nil, nil, nil, false
+			}
+
+			accountAddress := "0x" + stack[0].Text(16)
+
+			account := state.Accounts[accountAddress]
+
+			code := account.Code.Bin
+			if len(code) == 0{
+				stack = append([]*big.Int{big.NewInt(0)}, stack[1:]...)
+			} else {
+				codeBytes, _ := hex.DecodeString(code)
+
+				hasher := sha3.NewLegacyKeccak256()
+				hasher.Write(codeBytes)
+				
+				hash := hasher.Sum(nil)
+
+				stack = append([]*big.Int{new(big.Int).SetBytes(hash)}, stack[1:]...)
+			}
+		}
+
+		//61. SELFBALANCE
+		if op == 0x47 {
+			accountAddress := transaction.To
+
+			account := state.Accounts[accountAddress]
+
+			balance := account.Balance
+
+			if len(balance) == 0 {
+				stack = append([]*big.Int{big.NewInt(0)}, stack...)
+			} else {
+
+				if len(balance) % 2 != 0 {
+					balance = "0" + balance[2:]
+				}
+
+				balanceBytes, _ := hex.DecodeString(balance)
+				
+				balanceInt := new(big.Int).SetBytes(balanceBytes)
+
+				stack = append([]*big.Int{balanceInt}, stack...)
+			}
+		}
+
+			//62. SSTORE
+			if op == 0x55 {
+				if len(stack) < 2 {
+					return nil, nil, nil, false
+				}
+
+				key := stack[0]
+				value := stack[1]
+
+				stack = stack[2:]
+
+				storage[key.Text(16)] = value
+			}
+
+			//63. SLOAD
+			if op == 0x54 {
+				if len(stack) < 1 {
+					return nil, nil, nil, false
+				}
+
+				key := stack[0]
+				value := storage[key.Text(16)]
+
+				if value == nil {
+					value = big.NewInt(0)
+				}
+
+				stack = append([]*big.Int{value}, stack[1:]...)
+			}
+
+			//64. LOG0
+			if op == 0xa0 {
+				address := transaction.To
+
+				if len(stack) < 2 {
+					return nil, nil, nil, false
+				}
+
+				if len(address) == 0 {
+					return nil, nil, nil, false
+				} 
+				
+				offset := int(stack[0].Int64())
+				size := int(stack[1].Int64())
+
+				stack = stack[2:]
+
+				data := m.MLoad(offset, size)
+
+				stringData := hex.EncodeToString(data)
+
+				log := Log {
+					Address: address,
+					Data: stringData,
+					Topics: []string{},
+				}
+				
+				Logs = append(Logs, log)
+			}
+
+			//65. LOG1-4
+			if 0xa1 <= op && op <= 0xa4 {
+				address := transaction.To
+
+				if len(stack) < int(op - 0xa0) + 2 {
+					return nil, nil, nil, false
+				}
+
+				if len(address) == 0 {
+					return nil, nil, nil, false
+				} 
+				
+				offset := int(stack[0].Int64())
+				size := int(stack[1].Int64())
+				
+				var log Log;
+
+				for i:=int(0xa0); i<int(op); i++ {
+					log.Topics = append(log.Topics, "0x" + stack[i-int(0xa0)+2].Text(16))
+				}
+				
+				stack = stack[int(op)-int(0xa0) + 2:]
+
+				data := m.MLoad(offset, size)
+
+				stringData := hex.EncodeToString(data)
+
+				log.Address = address
+				log.Data = stringData
+				
+				Logs = append(Logs, log)
+			}
+
+			//66. RETURN
+			if op == 0xf3 {
+				if len(stack) < 2 {
+					return nil, nil, nil, false
+				}
+				offset := int(stack[0].Int64())
+				size := int(stack[1].Int64())
+				stack = stack[2:]
+
+				data := m.MLoad(offset, size)
+				Return = new(big.Int).SetBytes(data)
+				return stack, Logs, Return, true
+			}
+
+			//67. REVERT
+			//**  For the purpose of this implementation, REVERT and RETURN are essentially the same with different success
+			//**  indicators. In actual practice, REVERT should also return the remaining gas.  
+			if op == 0xfd {
+				if len(stack) < 2 {
+					return nil, nil, nil, false
+				}
+				offset := int(stack[0].Int64())
+				size := int(stack[1].Int64())
+				stack = stack[2:]
+
+				data := m.MLoad(offset, size)
+				Return = new(big.Int).SetBytes(data)
+				return stack, Logs, Return, false
+			}
+
+			//68. CALL
+			if op == 0xf1 {
+				if len(stack) < 7 {
+					return nil, nil, nil, false
+				}
+				gas := stack[0]
+				address := "0x" + stack[1].Text(16)
+				value := stack[2]
+				inputOffset := int(stack[3].Int64())
+				inputSize := int(stack[4].Int64())
+				outputOffset := int(stack[5].Int64())
+				outputSize := int(stack[6].Int64())
+				stack = stack[7:]
+
+				_ ,_ = gas, value
+
+				input := m.MLoad(inputOffset, inputSize)
+
+				_ = input
+
+				account := state.Accounts[address]
+
+				evmCode, _ := hex.DecodeString(account.Code.Bin)
+				var evmTransaction Transaction
+
+				evmTransaction.From = transaction.To				
+
+				currentExecutingAccount = address
+				evmStack, evmLog, evmReturn, evmSuccess := Evm(evmCode, evmTransaction, block, state, storage)
+				currentExecutingAccount = ""
+
+				if evmReturn != nil {
+					LatestReturnData = evmReturn.Bytes()
+					outputBytes := evmReturn.Bytes()
+					if len(outputBytes) < outputSize {
+						padding := make([]byte, outputSize - len(outputBytes))
+						outputBytes = append(padding, outputBytes...)
+					} else {
+						outputBytes = outputBytes[:outputSize]
+					}
+					m.Mstore(outputBytes, outputOffset)
+				}
+				_, _ = evmStack, evmLog
+
+				if evmSuccess {
+					stack = append([]*big.Int{big.NewInt(1)}, stack...)
+				} else {
+					stack = append([]*big.Int{big.NewInt(0)}, stack...)
+				}
+			}
+
+			//69. RETURNDATASIZE
+			if op == 0x3d {
+				returnDataSize := len(LatestReturnData)
+				stack = append([]*big.Int{big.NewInt(int64(returnDataSize))}, stack...)
+			}
+
+			//70. RETURNDATACOPY
+			if op == 0x3e {
+				if len(stack) < 3 {
+					return nil, nil, nil, false
+				}
+
+				destOffset := int(stack[0].Int64())
+				offset := int(stack[1].Int64())
+				size := int(stack[2].Int64())
+
+				if offset + size > len(LatestReturnData) {
+					return nil, nil , nil , false
+				} else {
+					dataToBeCopied := LatestReturnData[offset:offset + size]
+					m.Mstore(dataToBeCopied, destOffset)
+				}
+
+				stack = stack[3:]
+			}
+
+			//71. DELEGATECALL
+			if op == 0xf4 {
+				if len(stack) < 6 {
+					return nil, nil, nil, false
+				}
+
+				gas := stack[0]
+				address := "0x" + stack[1].Text(16)
+				inputOffset := int(stack[2].Int64())
+				inputSize := int(stack[3].Int64())
+				outputOffset := int(stack[4].Int64())
+				outputSize := int(stack[5].Int64())
+
+				stack = stack[6:]
+				_ = gas
+
+				input := m.MLoad(inputOffset, inputSize)
+				_ = input
+
+				account := state.Accounts[address]
+				_ = account
+
+				evmCode, err := hex.DecodeString(account.Code.Bin)
+				if err != nil {
+					return nil, nil, nil, false
+				}
+				
+				var evmTransaction Transaction; var evmState State;
+
+				evmTransaction = transaction			
+
+				currentExecutingAccount = address
+				evmStack, evmLog, evmReturn, evmSuccess := Evm(evmCode, evmTransaction, block, evmState, storage)
+				currentExecutingAccount = ""
+
+				if evmReturn != nil {
+					LatestReturnData = evmReturn.Bytes()
+					
+					outputBytes := evmReturn.Bytes()
+					if outputSize > len(outputBytes) {
+						return nil, nil , nil , false
+					} else {
+						dataToBeCopied := outputBytes[:outputSize]
+						m.Mstore(dataToBeCopied, outputOffset)
+					}
+				}
+				_, _ = evmStack, evmLog
+
+				if evmSuccess {
+					stack = append([]*big.Int{big.NewInt(1)}, stack...)
+				} else {
+					stack = append([]*big.Int{big.NewInt(0)}, stack...)
+				}
+			}
+
+			//72. STATICCALL
+			if op == 0xfa {
+				if len(stack) < 6 {
+					return nil, nil, nil, false
+				}
+
+				gas := stack[0]
+				address := "0x" + stack[1].Text(16)
+				inputOffset := int(stack[2].Int64())
+				inputSize := int(stack[3].Int64())
+				outputOffset := int(stack[4].Int64())
+				outputSize := int(stack[5].Int64())
+
+				stack = stack[6:]
+				_ = gas
+
+				input := m.MLoad(inputOffset, inputSize)
+				_ = input
+
+				account := state.Accounts[address]
+				_ = account
+
+				evmCode, err := hex.DecodeString(account.Code.Bin)
+				if err != nil {
+					return nil, nil, nil, false
+				}
+				
+				for i:=0; i<len(evmCode); i++ {
+					if (0xa0 <= evmCode[i] && evmCode[i] <= 0xa4) || evmCode[i] == 0xf0 || evmCode[i] == 0xf5 || evmCode[i] == 0x55 || evmCode[i] == 0xf1 || evmCode[i] == 0xff {
+						stack = append([]*big.Int{big.NewInt(0)}, stack...)
+						return stack, Logs, Return, successOrNot
+					}
+				}   
+
+				var evmTransaction Transaction; var evmState State;
+
+				evmTransaction = transaction			
+
+				currentExecutingAccount = address
+				evmStack, evmLog, evmReturn, evmSuccess := Evm(evmCode, evmTransaction, block, evmState, storage)
+				currentExecutingAccount = ""
+
+				if evmReturn != nil {
+					LatestReturnData = evmReturn.Bytes()
+					
+					outputBytes := evmReturn.Bytes()
+					if outputSize > len(outputBytes) {
+						return nil, nil , nil , false
+					} else {
+						dataToBeCopied := outputBytes[:outputSize]
+						m.Mstore(dataToBeCopied, outputOffset)
+					}
+				}
+				_, _ = evmStack, evmLog
+
+				if evmSuccess {
+					stack = append([]*big.Int{big.NewInt(1)}, stack...)
+				} else {
+					stack = append([]*big.Int{big.NewInt(0)}, stack...)
+				}
+			}
+
+			//73. CREATE
+			if op == 0xf0 {
+				if len(stack) < 3 {
+					return nil, nil, nil, false
+				}
+
+				value := stack[0]
+				memoryOffset := int(stack[1].Int64())
+				memorySize := int(stack[2].Int64())
+
+				stack = stack[3:]
+
+				contractCode := m.MLoad(memoryOffset, memorySize)
+
+				senderAddress := transaction.To
+				account := state.Accounts[senderAddress]
+
+				nonce := account.Nonce
+				account.Nonce++
+
+				addrBytes := common.HexToAddress(senderAddress).Bytes()
+				rlpEncoded, err := rlp.EncodeToBytes([]interface{}{addrBytes,nonce})
+
+				if err != nil {
+					return nil, nil, nil, false
+				}
+				
+				hash := crypto.Keccak256Hash(rlpEncoded)
+				newContractAddress := common.BytesToAddress(hash.Bytes()[12:])
+
+				var evmTransaction Transaction
+
+				evmStack, evmLog, evmReturn, evmSuccess := Evm(contractCode, evmTransaction, block, state, storage)
+				_, _ = evmStack, evmLog
+
+				newAccount := Account{
+					Nonce: 1,
+					Balance: "0x" + value.Text(16),
+					Storage: make(map[string]string),
+					Code: Code{	Bin: evmReturn.Text(16) },
+				}
+
+				if state.Accounts == nil {
+					state.Accounts = make(map[string]Account)
+				}
+
+				state.Accounts["0x" + (newContractAddress.Big()).Text(16)] = newAccount
+
+				if evmSuccess {
+					stack = append([]*big.Int{newContractAddress.Big()}, stack...)
+				} else {
+					stack = append([]*big.Int{big.NewInt(0)}, stack...)
+				}
+			}
+
+			//74. SELFDESTRUCT 
+			if op == 0xff {
+				if len(stack) < 1 {
+					return nil, nil, nil, false
+				}
+				if len(currentExecutingAccount) == 0 {
+					return nil, nil, nil, false
+				}
+
+				selfDestruct := currentExecutingAccount
+				balance := state.Accounts[selfDestruct].Balance
+				accountAddress := "0x" + stack[0].Text(16)
+				stack = stack[1:]
+
+				state.Accounts[accountAddress] = Account{ Balance: balance }	
+
+				delete(state.Accounts, selfDestruct) 
+			}
+
+		}	
+
+		//** Stack Too Deep Error
+		if len(stack) > 1024 {
+			return nil, nil, nil, false
+		}
 		
-		return stack, successOrNot
+		return stack, Logs, Return, successOrNot
 }
 
 

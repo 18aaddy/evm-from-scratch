@@ -29,6 +29,7 @@ type code struct {
 type want struct {
 	Stack   []hexBigInt `json:"stack"`
 	Success bool        `json:"success"`
+	Logs    []Log       `json:"logs"`
 	Return  string      `json:"return"`
 }
 
@@ -99,14 +100,30 @@ func TestEVM(t *testing.T) {
 			state := State{
 				Accounts: tt.Accounts,
 			}
+			storage := make(map[string]*big.Int)
 
-			got, gotSuccess := Evm(bin, tt.Tx, tt.Block, state)
+			got, Logs, Return, gotSuccess := Evm(bin, tt.Tx, tt.Block, state, storage)
+
+			var returnString string
+			if Return == nil {
+				returnString = ""
+			} else {
+				returnString = Return.Text(16)
+			}
+
 			if gotSuccess != tt.Want.Success {
 				t.Errorf("Evm(…) got success = %t; want %t", gotSuccess, tt.Want.Success)
 			}
 			if diff := cmp.Diff(toHexStrings(tt.Want.StackInts()), toHexStrings(got), cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("Evm(…) stack mismatch; diff (-want +got)\n%s", diff)
 			}
+			if diff := cmp.Diff(tt.Want.Logs, Logs, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("Evm(…) Logs mismatch; diff (-want +got)\n%s", diff)
+			}
+			if diff := cmp.Diff(tt.Want.Return, returnString, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("Evm(…) Return mismatch; diff (-want +got)\n%s", diff)
+			}
+
 
 			if t.Failed() {
 				t.Logf("✕  %v", tt.Name)
